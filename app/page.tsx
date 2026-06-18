@@ -1,10 +1,10 @@
 "use client";
 
 import { HoleBackground } from "@/components/animate-ui/components/backgrounds/hole";
-import { BlueTitle, GrayTitle } from "@/components/reusables";
+import { BlueTitle, GrayTitle, SectionHeading, SectionLabel } from "@/components/reusables";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { PLACEHOLDERS, SUGGESTIONS } from "@/lib/data";
+import { PLACEHOLDERS, SUGGESTIONS, FEATURES } from "@/lib/data";
 import { cn } from "@/lib/utils";
 import { SignInButton, useAuth } from "@clerk/nextjs";
 import {
@@ -156,7 +156,31 @@ export default function Home() {
 
       {/* Browser Preview UI */}
       <Preview />
-      
-    </main>
+
+      <section className="px-4 pb-32">
+        <div className="mx-auto mb-14 max-w-5xl text-center">
+          <SectionLabel>Everything you need</SectionLabel>
+          <SectionHeading gray="From prompt" blue="to production."/>
+        </div>
+        <div className="mx-auto grid max-w-5xl gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          {FEATURES.map((feature, i) => (
+            <div
+              key={i}
+              className="group relative overflow-hidden rounded-2xl border border-white/8 bg-white/3 p-8 transition-colors hover:bg-white/5"
+            >
+              <div className="mb-4 inline-flex rounded-lg bg-blue-500/10 p-3 text-blue-400 ring-1 ring-blue-500/20">
+                <feature.icon className="h-6 w-6" />
+              </div>
+              <h3 className="mb-3 text-lg font-medium text-white/90">
+                {feature.label}
+              </h3>
+              <p className="text-sm leading-relaxed text-white/50">
+                {feature.desc}
+              </p>
+            </div>
+          ))}
+        </div>
+      </section>
+    </main> 
   );
 }
