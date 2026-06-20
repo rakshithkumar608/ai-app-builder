@@ -1,6 +1,20 @@
-import React from 'react'
+"use client"
+
+import React, { useCallback, useState } from 'react'
+import { CodePanel } from './CodePanel'
+import { FileData, StatusStep } from '@/types/workspace';
 
 export const WorkspaceClient = () => {
+  const [fileData, setFileData] = useState<FileData | null>(null);
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [statusLog, setStatusLog] = useState<StatusStep[]>([]);
+
+  const handleFilePatch = useCallback((patches: FileData) => {
+    setFileData(patches);
+  }, [])
+
+  
   return (
     <div className='flex h-[calc(100vh-4rem)] overflow-hidden bg-[#0a0a0a]'>
         {/* Chat panel - left */}
@@ -11,11 +25,12 @@ export const WorkspaceClient = () => {
         </div>
 
         {/* Code panel - right */}
-        <div className="flex flex-1 flex-col overflow-hidden items-center justify-center">
-            <p className="text-xs text-white/20">
-            Code panel comming soon
-            </p>
-        </div>
+        <CodePanel 
+        fileData={fileData}
+        isGenerating={isGenerating}
+        statusLog={statusLog}
+        onFilePatch={handleFilePatch}
+        />
     </div>
   )
 }
