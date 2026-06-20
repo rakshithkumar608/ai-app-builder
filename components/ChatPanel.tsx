@@ -1,10 +1,13 @@
 "use client";
 
 import { Message, StatusStep } from "@/types/workspace";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BlueTitle } from "./reusables";
 import PricingModal from "./PricingModal";
 import { cn } from "@/lib/utils";
+import Image from "next/image";
+import { ArrowUp, Check, Loader2, Paperclip } from "lucide-react";
+import { Button } from "./ui/button";
 
 interface ChatPanelProps {
   messages: Message[];
@@ -60,6 +63,52 @@ export const ChatPanel = ({
     },
   ];
 
+  const statuses = [
+    { label: "Planning the component structure", status: "done" },
+    { label: "Writing App.js and components", status: "done" },
+    { label: "Validating packages...", status: "running" },
+  ];
+
+  // Auto-resize textarea as user types
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  }, [input]);
+
+  // Auto-scroll to bottom on new messages or status updates
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages, isGenerating, isImproving]);
+
+  // Auto-submit initialPrompt exactly once on mount
+  // Guard ref prevents double-fire in React strictMode
+  useEffect(() => {
+    if (!initialPrompts || hasAutoSubmittedRef.current || messages.length > 0)
+      return;
+    hasAutoSubmittedRef.current = true;
+    onGenerate(initialPrompts);
+    // eslint-disable-next-line react-hooks/exhastive-deps
+  }, []);
+
+  const handleSubmit = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || isGenerating || isImproving || noCredits) return;
+    setInput("");
+    // TODO: pass pendingImageUrl as second arg + reset it after submit
+    await onGenerate(trimmed);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
+
   return (
     <div className="flex w-[320px] shrink-0 flex-col bg-[#0d0d0d]">
       <div className="flex items-center justify-between border-b border-white/6 px-4 py-3">
@@ -94,7 +143,7 @@ export const ChatPanel = ({
         )}
 
         <div className="space-y-4">
-          {msgs.map((msg, i) => (
+          {messages.map((msg, i) => (
             <div key={i}>
               {msg.role === "user" ? (
                 <div className="flex items-start justify-end gap-2">
@@ -109,6 +158,13 @@ export const ChatPanel = ({
                 </div>
               ) : (
                 <div className="flex items-start gap-2">
+                  <Image
+                    src="/logo-short.jpeg"
+                    alt="logo"
+                    width={24}
+                    height={24}
+                    className="rounded-md mt-0.5 h-6 w-6 shrink-0"
+                  />
                   <div className="rounded-2xl rounded-br-sm bg-white/10 px-3.5 py-2.5">
                     <p className="text-[13px] leading-relaxed text-white/80 wrap-break-word">
                       {msg.content}
@@ -118,7 +174,125 @@ export const ChatPanel = ({
               )}
             </div>
           ))}
+
+          {/* Status steps - show while isGenerating */}
+          {isGenerating && (
+            <div className="flex items-start gap-2">
+              <Image
+                src="/logo-short.jpeg"
+                alt="logo"
+                width={24}
+                height={24}
+                className="rounded-md mt-0.5 h-6 w-6 shrink-0"
+              />
+
+              <div className="rounded-2xl rounded-tl-sm bg-white/5 px-3.5 py-3">
+                <div className="space-y-2">
+                  {statusLog.map((step, i) => (
+                    <div key={i} className="flex items-center gap-2.5">
+                      <div className="flex h-4 w-4 shrink-0 items-center justify-center">
+                        {step.status === "running" ? (
+                          <Loader2 className="h-3 w-3 animate-spin text-blue-400/80" />
+                        ) : (
+                          <svg
+                            className="h-3 w-3 text-white/25"
+                            viewBox="0 0 12 12"
+                            fill="none"
+                          >
+                            <path
+                              d="M2 6l3 3 5-5"
+                              stroke="currentColor"
+                              strokeWidth="1.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        )}
+                      </div>
+                      <span
+                        className={cn(
+                          "text-[12px] transition-colors duration-300",
+                          step.status === "running"
+                            ? "text-white/75"
+                            : "text-white/25",
+                        )}
+                      >
+                        {step.label}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
+      </div>
+
+      <div className="border-t border-white/6 p-3">
+        {/* TODO: pending image preview thumbnail with X remove button */}
+        <div
+          className={cn(
+            "rounded-xl border bg-white/4 transition-colors",
+            isGenerating || isImproving || noCredits
+              ? "border-white/4 opacity-60"
+              : "border-white/8 hover:border-white/12",
+          )}
+        >
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={isGenerating || isImproving || noCredits}
+            placeholder={
+              noCredits
+                ? "Upgrade to Keep building..."
+                : isImproving
+                  ? "Cline is improving your app..."
+                  : isGenerating
+                    ? "Generating..."
+                    : "Ask AI to modify..."
+            }
+            rows={1}
+            className="w-full resize-none bg-transparent px-3.5 pb-2 pt-3 text-[13px] text-white/80 placeholder:text-white/20 focus:outline-none"
+            style={{ maxHeight: 160 }}
+          />
+
+          <div className="flex items-center justify-between px-2 pb-2">
+            <Button
+              variant={"ghost"}
+              size={"icon"}
+              disabled
+              className={"h-7 w-7 rounded-lg text-white/25 opacity-40"}
+            >
+              <Paperclip className="h-3.5 w-3.5" />
+            </Button>
+
+            <Button
+              size={"icon"}
+              onClick={handleSubmit}
+              disabled={!canSubmit}
+              className={cn(
+                "h-7 w-7 rounded-lg transition-all",
+                canSubmit
+                  ? "bg-white text-black hover:bg-white/90 active:scale-95"
+                  : "bg-white/8 text-white/20 shadow-none",
+              )}
+            >
+              {isGenerating || isImproving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ArrowUp className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          </div>
+        </div>
+
+        <p className="mt-1.5 text-center text-[10px] text-white/15">
+          {isGenerating || isImproving
+            ? "Click ■ to stop generation"
+            : "⏎ to send · Shift+⏎ for new line"}
+        </p>
       </div>
     </div>
   );
