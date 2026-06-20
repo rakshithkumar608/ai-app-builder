@@ -22,8 +22,10 @@ export default async function WorkspacePage({
 
   return (
     <WorkspaceClient
-      prompt={prompt}
-      id={id}
+      initialPrompts={prompt ?? null}
+      userCredits={10}
+      userId={userId}
+      userPlan='free'
     />
   );
 }
