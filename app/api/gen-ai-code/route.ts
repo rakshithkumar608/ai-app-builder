@@ -4,6 +4,7 @@ import { FileData, Message } from "@/types/workspace";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
 import { GoogleGenAI } from "@google/genai";
+import { aj } from "@/lib/arcjet";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -144,6 +145,27 @@ export async function POST(req: NextRequest) {
   }
 
   // --- Arcjet: rate limit, prompt injection, sensitive info -----------
+  const arcjetReq = new Request(req.url, {
+    method: req.method,
+    headers: req.headers,
+    body: JSON.stringify(body),
+  });
+
+
+  const lastUserMessage = 
+  [...messages].reverse().find((m)=>m.role === "user")?.content ?? "";
+  const decision = await aj.protect(arcjetReq, {
+    requested: 1,
+    userId: clerkId,
+    detectPromptInjectionMessage: lastUserMessage,
+  });
+  if (decision.isDenied()) {
+    // Returns the reason type as the message - rateLimit, bot, promptInjection, etc;
+    return Response.json(
+      {message: decision.reason?.type ?? "Request blocked"},
+      {status: 429},
+    );
+  }
 
   const user = await db.user.findUnique({
     where: { clerkId },
