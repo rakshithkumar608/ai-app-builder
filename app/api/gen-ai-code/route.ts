@@ -146,7 +146,7 @@ export async function POST(req: NextRequest) {
   // --- Arcjet: rate limit, prompt injection, sensitive info -----------
 
   const user = await db.user.findUnique({
-    where: { id: userId, clerkId },
+    where: { clerkId },
     select: { id: true, credits: true },
   });
 
@@ -210,11 +210,11 @@ export async function POST(req: NextRequest) {
                 if (label) {
                   enqueue(sseEvent("status", { message: label }));
                   lastEmitTime = now;
-                } else {
-                  // Non-thought parts are the actual JSON output - accumulate them
-                  accumulated += part.text;
-                }
+                } 
               }
+            } else {
+              // Non-thought parts are the actual JSON output - accumulate them
+              accumulated += part.text;
             }
           }
         }

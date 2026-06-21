@@ -4,6 +4,7 @@ import { DM_Sans, Lora } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Header } from "@/components/Header";
+import { Toaster } from "sonner";
 
 const lora = Lora({
   subsets: ["latin"],
@@ -40,6 +41,8 @@ export default function RootLayout({
         >
           <Header />
           <main>{children}</main>
+
+          <Toaster richColors position='top-right' duration={3000} closeButton />
           
         </ThemeProvider>
       </body>

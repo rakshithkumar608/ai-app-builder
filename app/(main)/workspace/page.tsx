@@ -20,6 +20,8 @@ export default async function WorkspacePage({
 
   const { prompt, id } = await searchParams;
 
+  let workspace = null;
+
   return (
     <WorkspaceClient
       initialPrompts={prompt ?? null}
