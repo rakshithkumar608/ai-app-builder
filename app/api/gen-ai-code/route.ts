@@ -35,8 +35,8 @@ function extractThoughtLabel(text: string): string | null {
 // ------ npm vbalidation -----
 
 async function validateDependencies(
-  deps: Record<string, string>
-) : Promise<Record<string, string>> {
+  deps: Record<string, string>,
+): Promise<Record<string, string>> {
   const valid: Record<string, string> = {};
   await Promise.all(
     Object.entries(deps).map(async ([pkg, version]) => {
@@ -45,10 +45,10 @@ async function validateDependencies(
           signal: AbortSignal.timeout(1500),
         });
         if (res.ok) valid[pkg] = version;
-      } catch  {
+      } catch {
         // silently skip hallucination packages
       }
-    })
+    }),
   );
   return valid;
 }
@@ -210,7 +210,7 @@ export async function POST(req: NextRequest) {
                 if (label) {
                   enqueue(sseEvent("status", { message: label }));
                   lastEmitTime = now;
-                } 
+                }
               }
             } else {
               // Non-thought parts are the actual JSON output - accumulate them
@@ -247,6 +247,13 @@ export async function POST(req: NextRequest) {
         // We hit the npm registry for each dep and silenmtly drop any fakes.
         // Real packages pass through unchaged.
 
+        const {
+          assistantMessage,
+          title: aiTitle,
+          files,
+          dependencies,
+        } = parsed;
+
         enqueue(sseEvent("status", { message: "Validating  packages..." }));
         const validatedDeps = await validateDependencies(dependencies ?? {});
         const newFileData: FileData = {
@@ -265,34 +272,35 @@ export async function POST(req: NextRequest) {
         const lastUserMsg = messages[messages.length - 1];
         const updateMessages: Message[] = [
           ...messages,
-          {role: "assistant", content: assistantMessage},
+          { role: "assistant", content: assistantMessage },
         ];
 
         const [workspace] = await db.$transaction([
           workspaceId
-          ? db.workspace.update({
-            where: { id: workspaceId, userId },
-            data: {
-              messages: updateMessages as never,
-              fileData: newFileData as never,
-            },
-          })
-          : db.workspace.create({
-            data: {
-              userId,
-              title: aiTitle ?? lastUserMsg.content.slice(0, 80),
-              messages: updateMessages as never,
-              fileData: newFileData as never,
-            },
-          }),
+            ? db.workspace.update({
+                where: { id: workspaceId, userId },
+                data: {
+                  messages: updateMessages as never,
+                  fileData: newFileData as never,
+                },
+              })
+            : db.workspace.create({
+                data: {
+                  userId,
+                  title: aiTitle ?? lastUserMsg.content.slice(0, 80),
+                  messages: updateMessages as never,
+                  fileData: newFileData as never,
+                },
+              }),
+
           db.user.update({
             where: { id: userId },
             data: {
               credits: {
                 decrement: CREDIT_COST_PER_GENERATION,
-              }
+              },
             },
-          })
+          }),
         ]);
 
         // Re-fetch updated credit balance to return accurate value to the client.
@@ -300,7 +308,7 @@ export async function POST(req: NextRequest) {
 
         const updatedUser = await db.user.findUnique({
           where: { id: userId },
-          select: { credits: true }
+          select: { credits: true },
         });
 
         // ---- Final done event ------
@@ -311,20 +319,18 @@ export async function POST(req: NextRequest) {
             workspaceId: workspace.id,
             assistantMessage,
             fileData: newFileData,
-            creditsRemaining: 
-            updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
+            creditsRemaining:
+              updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
           }),
         );
-        
       } catch (error) {
         console.error("[gen-ai-code] stream error:", error);
 
         enqueue(
           sseEvent("error", {
             message: "Stream failed. Please try again.",
-          })
+          }),
         );
-
       } finally {
         controller.close();
       }
@@ -335,9 +341,9 @@ export async function POST(req: NextRequest) {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
+      Connection: "keep-alive",
       "X-Accel-Buffering": "no", // Disable nginx buffering
-    }
+    },
   });
 }
 
