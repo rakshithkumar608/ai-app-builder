@@ -3,7 +3,7 @@ export type MessageRole = "user" | "assistant";
 export interface Message {
     role: MessageRole;
     content: string;
-    imagrUrl?: string;
+    imageUrl?: string;
 }
 
 

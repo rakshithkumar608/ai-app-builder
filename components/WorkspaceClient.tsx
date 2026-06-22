@@ -69,6 +69,10 @@ export const WorkspaceClient = ({
     workspaceIdRef.current = workspaceId;
   }, [workspaceId]);
 
+  // AbortController refs - used to cancle in-flight streams
+  const generateAbortRef = useRef<AbortController | null>(null);
+  const improveAbortRef = useRef<AbortController | null>(null);
+
   const handleFilePatch = useCallback((patches: FileData) => {
     setFileData(patches);
   }, []);
@@ -106,11 +110,15 @@ export const WorkspaceClient = ({
       setIsGenerating(true);
       setStatusLog([{ label: "Thinking...", status: "running" }])
 
+      // Create a new abort controller for this generation request
+      const abortController = new AbortController();
+      generateAbortRef.current = abortController;
 
       try {
         const res = await fetch("/api/gen-ai-code", {
           method: "POST",
           headers: { "Content-Type" : "application/json" },
+          signal: abortController.signal,
           body: JSON.stringify({
             workspaceId: currentWorkspaceId,
             userId,
@@ -153,7 +161,7 @@ export const WorkspaceClient = ({
               const event = JSON.parse(line.slice(6));
 
               if (event.type === "status") {
-                // Gemini thought label - adds a new strep to the status log
+                // Gemini thought label - adds a new step to the status log
                 //  e.g. "Designing layout...", "Adding interactivity"
                 pushStep(event.message);
               } else if (event.type === "done") {
@@ -170,26 +178,40 @@ export const WorkspaceClient = ({
                   "",
                   `/workspace?id=${event.workspaceId}`
                 );
-              } else if (event.type === "erroe") {
-                throw new Error(event.message);
+              } else if (event.type === "error") {
+                // Re-throw so it escapes to the outer catch and shows a toast
+                throw Object.assign(new Error(event.message ?? "Generation failed"), { __sse: true });
               }
             } catch (error) {
-              // skip mailform SSE lines
+              // Re-throw SSE error events — only skip malformed JSON lines
+              if (error instanceof Error && (error as Error & { __sse?: boolean }).__sse) throw error;
+              // skip malformed SSE lines
             }
           }
         }
       } catch (error) {
+        // User-initiated stop - silently roll back the user message
+        if (error instanceof Error && error.name === "AbortError") {
+          setMessages((prev) => prev.slice(0, -1));
+          return; 
+        }
         toast.error(
           error instanceof Error ? error.message : "Something went wrong.",
         );
         setMessages((prev) => prev.slice(0, -1));
       } finally {
+        generateAbortRef.current = null;
         setIsGenerating(false);
         setStatusLog([]);
       }
     },
     [credits, isGenerating, userId],
   );
+
+  const handleStop = useCallback(() => {
+    generateAbortRef.current?.abort();
+    improveAbortRef.current?.abort();
+  }, [])
 
   
   return (
@@ -202,6 +224,7 @@ export const WorkspaceClient = ({
        statusLog={statusLog}
        credits={credits}
        initialPrompts={initialPrompts}
+       onStop={handleStop}
        onGenerate={handleGenerate}
        userId={userId}
        workspaceId={workspaceId} 

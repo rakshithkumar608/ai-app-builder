@@ -33,6 +33,32 @@ function extractThoughtLabel(text: string): string | null {
   return null;
 }
 
+// ─── Retry with exponential backoff ──────────────────────────────────────────
+// Retries the given async fn up to `maxAttempts` times when it throws a 503.
+// Waits 2^attempt * 1000 ms between each attempt (2s, 4s, 8s...).
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts = 3,
+  onRetry?: (attempt: number) => void,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err: unknown) {
+      lastError = err;
+      const status = (err as { status?: number })?.status;
+      // Only retry on 503 Service Unavailable
+      if (status !== 503 || attempt === maxAttempts - 1) throw err;
+      const delayMs = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
+      onRetry?.(attempt + 1);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 // ------ npm vbalidation -----
 
 async function validateDependencies(
@@ -145,25 +171,30 @@ export async function POST(req: NextRequest) {
   }
 
   // --- Arcjet: rate limit, prompt injection, sensitive info -----------
+  // Reconstruct a new Request with the same body for Arcjet to read
   const arcjetReq = new Request(req.url, {
     method: req.method,
     headers: req.headers,
     body: JSON.stringify(body),
   });
 
+  
+  const lastUserMessage =
+    [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
 
-  const lastUserMessage = 
-  [...messages].reverse().find((m)=>m.role === "user")?.content ?? "";
-  const decision = await aj.protect(arcjetReq, {
+  const decision = await aj.protect(req, {
     requested: 1,
     userId: clerkId,
     detectPromptInjectionMessage: lastUserMessage,
+    // Explicitly pass the text to scan so Arcjet doesn't auto-read the body (fixes deprecation warning)
+    sensitiveInfoValue: lastUserMessage,
   });
+
   if (decision.isDenied()) {
-    // Returns the reason type as the message - rateLimit, bot, promptInjection, etc;
+    // Returns the reason type as the message - rateLimit, bot, promptInjection, etc.
     return Response.json(
-      {message: decision.reason?.type ?? "Request blocked"},
-      {status: 429},
+      { message: decision.reason?.type ?? "Request blocked" },
+      { status: 429 },
     );
   }
 
@@ -201,19 +232,26 @@ export async function POST(req: NextRequest) {
       try {
         const contents = buildContents(messages, FileData);
 
-        const geminiStream = await ai.models.generateContentStream({
-          model: "gemini-3.5-flash",
-          contents,
-          config: {
-            systemInstruction: SYSTEM_PROMPT,
-            temperature: 0.7,
-            //  Force JSON output - Gemini will never wrap the response in markdown
-            responseMimeType: "application/json",
-            thinkingConfig: {
-              includeThoughts: true,
-            },
+        const geminiStream = await withRetry(
+          () =>
+            ai.models.generateContentStream({
+              model: "gemini-3.5-flash",
+              contents,
+              config: {
+                systemInstruction: SYSTEM_PROMPT,
+                temperature: 0.7,
+                //  Force JSON output - Gemini will never wrap the response in markdown
+                responseMimeType: "application/json",
+                thinkingConfig: {
+                  includeThoughts: true,
+                },
+              },
+            }),
+          3,
+          (attempt) => {
+            enqueue(sseEvent("status", { message: `Retrying... (attempt ${attempt}/3)` }));
           },
-        });
+        );
 
         let accumulated = ""; // collects the actual JSON output chunks
         let lastEmitTime = 0; // used to throttle thought -> status emission
@@ -347,12 +385,12 @@ export async function POST(req: NextRequest) {
         );
       } catch (error) {
         console.error("[gen-ai-code] stream error:", error);
-
-        enqueue(
-          sseEvent("error", {
-            message: "Stream failed. Please try again.",
-          }),
-        );
+        const status = (error as { status?: number })?.status;
+        const message =
+          status === 503
+            ? "Gemini is overloaded right now. Please try again in a moment."
+            : "Stream failed. Please try again.";
+        enqueue(sseEvent("error", { message }));
       } finally {
         controller.close();
       }
