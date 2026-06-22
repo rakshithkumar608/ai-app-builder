@@ -14,6 +14,7 @@ interface WorkspaceClientProps {
   userId: string;
   userPlan: string;
   workspace: WorkspaceData | null;
+  isImproving: boolean;
 }
 
 function parseMessages(raw: unknown): Message[] {
@@ -53,6 +54,7 @@ export const WorkspaceClient = ({
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusLog, setStatusLog] = useState<StatusStep[]>([]);
+  const [isImproving, setIsImproving] = useState(false)
 
   const messagesRef = useRef<Message[]>(messages);
   useEffect(() => {
@@ -237,6 +239,12 @@ export const WorkspaceClient = ({
         isGenerating={isGenerating}
         statusLog={statusLog}
         onFilePatch={handleFilePatch}
+        isImproving={isImproving}
+        onFixError={(error) => 
+          handleGenerate(
+            `There is an error in the preview:\n\n\`\`\n${error}\n\`\`\`\n\n Please fix it.`,
+          )
+        }
         />
     </div>
   )
