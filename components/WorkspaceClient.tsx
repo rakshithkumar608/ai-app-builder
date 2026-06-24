@@ -15,6 +15,7 @@ interface WorkspaceClientProps {
   userPlan: string;
   workspace: WorkspaceData | null;
   isImproving: boolean;
+
 }
 
 function parseMessages(raw: unknown): Message[] {
@@ -93,6 +94,131 @@ export const WorkspaceClient = ({
       i === prev.length -1 ? {...s, status: "done"} : s),
     );
   };
+
+  const handleImprove = useCallback(
+    async (userRequest: string) => {
+      if (isGenerating || isImproving) return;
+      if (credits < MIN_CREDITS_TO_GENERATE) return;
+      if (!workspaceIdRef.current) return;
+
+      const currentFileData = fileDataRef.current;
+      if (!currentFileData) return;
+
+      setIsImproving(true);
+
+      setMessages((prev) => [
+        ...prev,
+        {role: "user", content: userRequest},
+        {role: "assistant", content: ""},
+      ]);
+
+      //  Create a fresh AbortController for this request
+      const abortController = new AbortController();
+      improveAbortRef.current = abortController;
+
+      try {
+        const res = await fetch("/api/improve", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({
+            userId,
+            workspaceId: workspaceIdRef.current,
+            userRequest,
+            fileData: currentFileData,
+          }),
+        });
+
+        if (res.status === 403) {
+          toast.error("Upgrade to Stareter or Pro to use Improve with AI.");
+          setMessages((prev) => prev.slice(0, -2));
+          return;
+        } 
+
+        if (res.status === 402) {
+          toast.error("Not enough credits.");
+          setMessages((prev) => prev.slice(0, -2));
+          return;
+        }
+
+        if (!res.ok || !res.body) throw new Error("Improve failed");
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let accumulatedThinking = "";
+
+         while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, {stream: true});
+          const lines = buffer.split("\n\n");
+          buffer = lines.pop() ?? "";
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+
+            try {
+              // Strip the "data:" prefix (6 characters) and parse the JSON payload
+              const event = JSON.parse(line.slice(6));
+
+              if (event.type === "thinking") {
+              //   Append to accumulate thinking text and update placeholder
+              accumulatedThinking += event.text;
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  role: "assistant",
+                  content: accumulatedThinking
+                };
+                return updated;
+              });
+              } else if (event.type === "file_patch") {
+                // Update the file patch using the helper
+                setFileData((prev) => {
+                  if (!prev) return null;
+
+                  const newFiles = {...prev.files};
+                  if (event.path in newFiles) {
+                    newFiles[event.path] = { code: event.code };
+                  }
+                  return { ...prev, files: newFiles };
+                });
+              } else if (event.type === "done") {
+                // Completed the run, clear improving flag
+               setFileData(event.fileData);
+               setCredits(event.creditsRemaining);
+              //  Replace thinking text with clean final summary
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  role: "assistant",
+                  content: event.summary,
+                };
+                return updated;
+              })
+
+              } else if (event.type === "error") {
+                throw new Error(event.message);
+              }
+            } catch (error) {
+              // skip malformed SSE lines
+            }
+          }
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Improve failed");
+        setMessages((prev) => prev.slice(0, -2));
+      } finally {
+        // Clean up improving flag and abort controller
+        setIsImproving(false);
+        improveAbortRef.current = null;
+        // clear status log and replace with error if needed
+        
+      }
+    },
+    [credits, isGenerating, isImproving, userId],
+  )
 
   const handleGenerate = useCallback(
     async (prompt: string, imageUrl?: string) => {
@@ -222,7 +348,7 @@ export const WorkspaceClient = ({
        <ChatPanel
        messages={messages}
        isGenerating={isGenerating}
-       isImproving={false}
+       isImproving={isImproving}
        statusLog={statusLog}
        credits={credits}
        initialPrompts={initialPrompts}
@@ -245,6 +371,9 @@ export const WorkspaceClient = ({
             `There is an error in the preview:\n\n\`\`\n${error}\n\`\`\`\n\n Please fix it.`,
           )
         }
+        appTitle = {fileData?.title ?? workspace?.title ?? null}
+        isProUser = {userPlan === "pro"}
+        onImprove={handleImprove}
         />
     </div>
   )

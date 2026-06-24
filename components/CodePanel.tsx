@@ -12,9 +12,10 @@ import {
 import { dracula } from "@codesandbox/sandpack-themes";
 import { useEffect, useRef, useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AlertTriangle, Code2, Eye, Wand2 } from "lucide-react";
+import { AlertTriangle, ArrowUp, Bot, Code2, Eye, Loader, Loader2, Wand2 } from "lucide-react";
 import { RingLoader } from "react-spinners";
 import { Button } from "./ui/button";
+import PricingModal from "./PricingModal";
 
 // placeholder
 
@@ -73,6 +74,9 @@ interface CodePanelProps {
   onFilePatch: (patches: FileData) => void;
   isImproving: boolean;
   onFixError: (error: string) => Promise<void>;
+  isProUser: boolean;
+  appTitle: string | null;
+  onImprove: (userRequest: string) => Promise<void>;
 }
 
 function SandpackInner({
@@ -83,6 +87,9 @@ function SandpackInner({
   isImproving,
   statusLog,
   onFixError,
+  isProUser,
+  appTitle,
+  onImprove,
 }: {
   fileData: FileData | null;
   isGenerating: boolean;
@@ -91,11 +98,25 @@ function SandpackInner({
   isImproving: boolean;
   statusLog: StatusStep[];
   onFixError: (error: string) => Promise<void>;
-  // TODO: appTitle, isProUser
+  isProUser: boolean;
+  appTitle: string | null;
+  onImprove: (userRequest: string) => Promise<void>;
 }) {
   const { sandpack, listen } = useSandpack();
   const [previewError, setPreviewError] = useState<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
+
+
+  const [improveInput, setImproveInput] = useState("");
+  const [showImproveInput, setShowImproveInput] = useState(false);
+
+  const handleImproveSubmit = async () => {
+    const trimmed = improveInput.trim();
+    if (!trimmed || isImproving) return;
+    setImproveInput("");
+    setShowImproveInput(false);
+    await onImprove(trimmed);
+  }
 
   useEffect(() => {
     unsubscribeRef.current=listen((msg)=>{
@@ -181,6 +202,67 @@ function SandpackInner({
         </TabsList>
 
         {/* TODO: Improve with AI button (Pro/Starter only, PricingModel for free) */}
+
+        {isProUser ? (
+          showImproveInput ? (
+          <div className="flex items-center gap-1.5">
+            <div className="relative flex items-center">
+              <Bot className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-violet-400"/>
+              <input
+                    autoFocus
+                    value={improveInput}
+                    onChange={(e) => setImproveInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleImproveSubmit();
+                      if (e.key === "Escape") setShowImproveInput(false);
+                    }}
+                    placeholder="What should I improve?"
+                    className="h-7 w-56 rounded-md border border-violet-500/30 bg-linear-to-r from-violet-500/10 via-fuchsia-500/10 to-cyan-500/10 pl-8 pr-3 text-xs text-white/80 placeholder:text-white/30 focus:border-violet-400/50 focus:outline-none focus:shadow-[0_0_10px_rgba(139,92,246,0.2)]"
+                  />
+            </div>
+            <button
+            onClick={handleImproveSubmit}
+            disabled={!improveInput.trim() || isImproving}
+            className="group relative flex h-7 w-7 items-center justify-center overflow-hidden rounded-md border border-violet-500/30 bg-linear-to-br from-violet-500/20 to-fuchsia-500/20 text-violet-300 transition-all duration-200 hover:border-violet-400/50 hover:from-violet-500/30 hover:to-fuchsia-500/30 hover:shadow-[0_0_10px_rgba(139,92,246,0.3)] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isImproving ? (
+                <Loader2 className="h-3 w-3 animate-spin"/>
+              ):(
+                <ArrowUp className="h-3 w-3" />
+              )}
+            </button>
+          </div>
+          
+        ):(
+          <button
+                onClick={() => setShowImproveInput(true)}
+                disabled={isImproving || !fileData}
+                className="group relative flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden rounded-md border border-white/10 bg-linear-to-r from-violet-500/10 via-fuchsia-500/10 to-cyan-500/10 px-2.5 text-xs font-medium transition-all duration-300 hover:border-white/20 hover:from-violet-500/20 hover:via-fuchsia-500/20 hover:to-cyan-500/20 hover:shadow-[0_0_12px_rgba(139,92,246,0.3)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <span className="pointer-events-none absolute inset-0 -translate-x-full animate-[shimmer_2.5s_infinite] bg-linear-to-r from-transparent via-white/10 to-transparent" />
+                {isImproving ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />
+                ) : (
+                  <Bot className="h-3.5 w-3.5 text-violet-400 transition-colors group-hover:text-violet-300" />
+                )}
+                <span className="bg-linear-to-r from-violet-300 via-fuchsia-300 to-cyan-300 bg-clip-text text-transparent">
+                  {isImproving ? "Improving…" : "Improve with Agent"}
+                </span>
+                {!isImproving && (
+                  <span className="rounded-sm bg-violet-500/30 px-1 py-0.5 text-[10px] font-semibold leading-none text-violet-300">
+                    PRO
+                  </span>
+                )}
+              </button>
+        )
+        ): (
+          <PricingModal reason="upgrade">
+            <span className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs text-white/40 hover:text-white/70">
+            <Wand2 className="h-3.5 w-3.5"/>
+            Improve
+            </span>
+          </PricingModal>
+        )}
         {/* TODO: Download ZIP Button */}
       </div>
 
@@ -284,6 +366,9 @@ export function CodePanel({
   onFilePatch: _onFilePatch,
   isImproving,
   onFixError,
+  isProUser,
+  appTitle,
+  onImprove,
 }: CodePanelProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
 
@@ -319,6 +404,9 @@ export function CodePanel({
           statusLog={statusLog}
           isImproving={isImproving}
           onFixError={onFixError}
+          isProUser={isProUser}
+          appTitle={appTitle}
+          onImprove={onImprove}
         />
       </SandpackProvider>
     </div>
