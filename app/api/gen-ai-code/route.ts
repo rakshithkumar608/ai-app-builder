@@ -154,11 +154,11 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { workspaceId, userId, messages, FileData } = body as {
+  const { workspaceId, userId, messages, fileData } = body as {
     workspaceId: string | null;
     userId: string;
     messages: Message[];
-    FileData: FileData | null;
+    fileData: FileData | null;
   };
 
   if (!messages?.length) {
@@ -230,7 +230,7 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(chunk));
 
       try {
-        const contents = buildContents(messages, FileData);
+        const contents = buildContents(messages, fileData);
 
         const geminiStream = await withRetry(
           () =>
