@@ -35,7 +35,8 @@ export default async function WorkspacePage({
       userCredits={user.credits}
       userId={user.id}
       userPlan={user.plan}
-      workspace={workspace}
-    />
+      workspace={workspace} 
+      isImproving={false}    
+      />
   );
 }

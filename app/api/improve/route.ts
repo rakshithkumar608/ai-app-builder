@@ -129,9 +129,10 @@ export async function POST(req: NextRequest) {
         .join("\n\n-----\n\n");
 
       const agent = new Agent({
-        providerId: "gemini",
-        modelId: "gemini-3.5-flash",
-        apiKey: process.env.GEMINI_API_KEY!,
+        providerId: "openai-compatible",
+        modelId: "moonshotai/kimi-k2-instruct-0905",
+        apiKey: process.env.GROQ_API_KEY!,
+        baseUrl: "https://api.groq.com/openai/v1",
         maxIterations: 8,
         systemPrompt: `You are an expert React developer improving a live browser preview app.
 
@@ -147,7 +148,7 @@ WORKFLOW:
 1. Understand what the user wants improved.
 2. Identify which files need to change.
 3. Call update_file for each file that needs changes (always include the COMPLETE file, not just the diff).
-4. Once all files are updated, call done_improving with a short summary.
+4. Once all files are updated, call append_instruction with a short summary.
 
 RULES:
 - Always write complete file contents — never partial snippets.
@@ -158,7 +159,7 @@ RULES:
         //  Auto-approve both tools - no human-in-loop needed in this context
         toolPolicies: {
           update_file: { autoApprove: true },
-          done_improving: { autoApprove: true },
+          append_instruction: { autoApprove: true },
         },
       });
 
@@ -177,7 +178,7 @@ RULES:
               enqueue(
                 sseEvent("thinking", {text: `\n\nUpdating \`${path}\`...`}),
               );
-            } else if (name === "done_improving") {
+            } else if (name === "append_instruction") {
               enqueue(
                 sseEvent("thinking", {text: "\n\nFinalizing improvements..."}),
               );
@@ -186,7 +187,7 @@ RULES:
         });
 
         // Run the agent ============
-        enqueue(sseEvent("status", {message: "Clime agent starting..."}));
+        enqueue(sseEvent("status", {message: "Groq agent starting..."}));
 
 
         const result = await agent.run(userRequest);

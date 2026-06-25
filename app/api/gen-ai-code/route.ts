@@ -3,10 +3,14 @@ import { db } from "@/lib/prisma";
 import { FileData, Message } from "@/types/workspace";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
-import { GoogleGenAI } from "@google/genai";
+import Groq from "groq-sdk";
 import { aj } from "@/lib/arcjet";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+// ─── Model to use ────────────────────────────────────────────────────────────
+// kimi-k2-instruct-0905: 1T param MoE, 262k context, excellent at code gen
+const GROQ_MODEL = "moonshotai/kimi-k2-instruct-0905";
 
 //  SSE helper ------------
 
@@ -17,30 +21,30 @@ function sseEvent(type: string, payload: unknown): string {
   })}\n\n`;
 }
 
-// ─── Extract short label from a Gemini thought chunk ─────────────────────────
-// Gemini thoughts often start with a bold heading like **Verify Config**
-// We extract that. If no bold heading, take the first sentence only.
+// ─── Retry with exponential backoff ──────────────────────────────────────────
+// Retries up to `maxAttempts` times on 429 (rate limit) or 503 (overload).
+// For 429, respects the Retry-After header / message delay.
 
-function extractThoughtLabel(text: string): string | null {
-  //  Try to grab **bold heading** at the start
-  const boldMatch = text.match(/\*\*([^*]{4,60})\*\*/);
-  if (boldMatch) return boldMatch[1].trim();
-
-  //  Fall back to first sentence
-  const sentence = text.split(/[.!?]/)[0].trim();
-  if (sentence.length >= 8 && sentence.length <= 80) return sentence;
-
+function parseRetryDelay(err: unknown): number | null {
+  try {
+    // Groq/OpenAI errors may carry a headers object or message with delay
+    const headers = (err as { headers?: Record<string, string> })?.headers;
+    if (headers?.["retry-after"]) {
+      return parseInt(headers["retry-after"], 10) * 1000;
+    }
+    const msg = (err as { message?: string })?.message ?? "";
+    const match = msg.match(/retry after (\d+)/i) ?? msg.match(/(\d+)\s*second/i);
+    if (match) return parseInt(match[1], 10) * 1000;
+  } catch {
+    // ignore
+  }
   return null;
 }
-
-// ─── Retry with exponential backoff ──────────────────────────────────────────
-// Retries the given async fn up to `maxAttempts` times when it throws a 503.
-// Waits 2^attempt * 1000 ms between each attempt (2s, 4s, 8s...).
 
 async function withRetry<T>(
   fn: () => Promise<T>,
   maxAttempts = 3,
-  onRetry?: (attempt: number) => void,
+  onRetry?: (attempt: number, delayMs: number) => void,
 ): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -49,17 +53,20 @@ async function withRetry<T>(
     } catch (err: unknown) {
       lastError = err;
       const status = (err as { status?: number })?.status;
-      // Only retry on 503 Service Unavailable
-      if (status !== 503 || attempt === maxAttempts - 1) throw err;
-      const delayMs = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
-      onRetry?.(attempt + 1);
+      const isRetryable = status === 503 || status === 429;
+      if (!isRetryable || attempt === maxAttempts - 1) throw err;
+      const delayMs =
+        status === 429
+          ? (parseRetryDelay(err) ?? Math.pow(2, attempt + 1) * 1000)
+          : Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
+      onRetry?.(attempt + 1, delayMs);
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
   throw lastError;
 }
 
-// ------ npm vbalidation -----
+// ------ npm validation -----
 
 async function validateDependencies(
   deps: Record<string, string>,
@@ -73,26 +80,26 @@ async function validateDependencies(
         });
         if (res.ok) valid[pkg] = version;
       } catch {
-        // silently skip hallucination packages
+        // silently skip hallucinated packages
       }
     }),
   );
   return valid;
 }
 
-// ─── History trimming ------
+// ─── History trimming ──────────────────────────────────────────────────────
 
 function trimHistory(messages: Message[]): Message[] {
   if (messages.length <= 10) return messages;
   return [messages[0], ...messages.slice(-8)];
 }
 
-//  ---- System prompt -------------
+// ─── System prompt ─────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an expert React developer. Your job is to generate complete, working React applications based on user prompts. 
+const SYSTEM_PROMPT = `You are an expert React developer. Your job is to generate complete, working React applications based on user prompts.
 
-RULES: 
-1.Always respond with a valid JSON object - no markdown fences, no extra text.
+RULES:
+1. Always respond with a valid JSON object - no markdown fences, no extra text.
 2. The JSON must match this exact shape:
 
 {
@@ -114,37 +121,41 @@ RULES:
 8. When modifying existing code, include ALL files (both changed and unchanged) in "files".
 9. Keep code clean, readable, and production-quality.
 10. If the user attaches an image, use it as a design reference and match the layout/style as closely as possible.
-
+11. Output ONLY the raw JSON object. Do not wrap it in markdown code fences or add any text before or after.
 `;
 
-// ------------- Gemini contents builder --------
+// ─── Build Groq messages array ─────────────────────────────────────────────
 
-function buildContents(messages: Message[], fileData: FileData | null) {
+function buildMessages(
+  messages: Message[],
+  fileData: FileData | null,
+): Groq.Chat.ChatCompletionMessageParam[] {
   const trimmed = trimHistory(messages);
 
-  return trimmed.map((msg, idx) => {
-    const role = msg.role === "assistant" ? "model" : "user";
-
-    if (msg.role === "user") {
-      const parts: object[] = [];
+  const chatMessages: Groq.Chat.ChatCompletionMessageParam[] = trimmed.map(
+    (msg, idx) => {
+      if (msg.role === "assistant") {
+        return { role: "assistant", content: msg.content };
+      }
 
       let text = msg.content;
 
       if (msg.imageUrl) {
-        text = `[The user has attached an image. Use this URL directly in the generated app where relevant (as img src, background0image, etc.):${msg.imageUrl}]\n\n${text}`;
+        text = `[The user has attached an image. Use this URL directly in the generated app where relevant (as img src, background-image, etc.): ${msg.imageUrl}]\n\n${text}`;
       }
 
       const isLast = idx === trimmed.length - 1;
       if (isLast && fileData) {
         text +=
-          "\n\nCurrent project files for content:\n" +
+          "\n\nCurrent project files for context:\n" +
           JSON.stringify(fileData, null, 2);
       }
-      parts.push({ text });
-      return { role, parts };
-    }
-    return { role, parts: [{ text: msg.content }] };
-  });
+
+      return { role: "user", content: text };
+    },
+  );
+
+  return chatMessages;
 }
 
 export async function POST(req: NextRequest) {
@@ -162,23 +173,10 @@ export async function POST(req: NextRequest) {
   };
 
   if (!messages?.length) {
-    return Response.json(
-      {
-        message: "No messages provided",
-      },
-      { status: 400 },
-    );
+    return Response.json({ message: "No messages provided" }, { status: 400 });
   }
 
   // --- Arcjet: rate limit, prompt injection, sensitive info -----------
-  // Reconstruct a new Request with the same body for Arcjet to read
-  const arcjetReq = new Request(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: JSON.stringify(body),
-  });
-
-  
   const lastUserMessage =
     [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
 
@@ -186,12 +184,10 @@ export async function POST(req: NextRequest) {
     requested: 1,
     userId: clerkId,
     detectPromptInjectionMessage: lastUserMessage,
-    // Explicitly pass the text to scan so Arcjet doesn't auto-read the body (fixes deprecation warning)
     sensitiveInfoValue: lastUserMessage,
   });
 
   if (decision.isDenied()) {
-    // Returns the reason type as the message - rateLimit, bot, promptInjection, etc.
     return Response.json(
       { message: decision.reason?.type ?? "Request blocked" },
       { status: 429 },
@@ -204,22 +200,10 @@ export async function POST(req: NextRequest) {
   });
 
   if (!user)
-    return Response.json(
-      {
-        message: "User not found",
-      },
-      {
-        status: 400,
-      },
-    );
+    return Response.json({ message: "User not found" }, { status: 400 });
 
   if (user.credits < CREDIT_COST_PER_GENERATION) {
-    return Response.json(
-      {
-        message: "Insufficient credits",
-      },
-      { status: 400 },
-    );
+    return Response.json({ message: "Insufficient credits" }, { status: 400 });
   }
 
   const encoder = new TextEncoder();
@@ -230,58 +214,76 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(chunk));
 
       try {
-        const contents = buildContents(messages, fileData);
+        const chatMessages = buildMessages(messages, fileData);
 
-        const geminiStream = await withRetry(
+        enqueue(sseEvent("status", { message: "Thinking..." }));
+
+        // ─── Stream from Groq ───────────────────────────────────────────
+        // We stream text chunks and accumulate the full JSON string.
+        // NOTE: We do NOT use response_format: json_object with streaming
+        // because Groq doesn't support that combination. Instead we prompt
+        // the model strictly and parse JSON from the accumulated output.
+
+        const groqStream = await withRetry(
           () =>
-            ai.models.generateContentStream({
-              model: "gemini-3.5-flash",
-              contents,
-              config: {
-                systemInstruction: SYSTEM_PROMPT,
-                temperature: 0.7,
-                //  Force JSON output - Gemini will never wrap the response in markdown
-                responseMimeType: "application/json",
-                thinkingConfig: {
-                  includeThoughts: true,
-                },
-              },
+            groq.chat.completions.create({
+              model: GROQ_MODEL,
+              messages: [
+                { role: "system", content: SYSTEM_PROMPT },
+                ...chatMessages,
+              ],
+              stream: true,
+              temperature: 0.6,
+              max_tokens: 32768,
             }),
           3,
-          (attempt) => {
-            enqueue(sseEvent("status", { message: `Retrying... (attempt ${attempt}/3)` }));
+          (attempt, delayMs) => {
+            const delaySec = Math.round(delayMs / 1000);
+            enqueue(
+              sseEvent("status", {
+                message: `Rate limited — retrying in ${delaySec}s (attempt ${attempt}/3)…`,
+              }),
+            );
           },
         );
 
-        let accumulated = ""; // collects the actual JSON output chunks
-        let lastEmitTime = 0; // used to throttle thought -> status emission
+        let accumulated = "";
+        let charCount = 0;
+        const STATUS_MESSAGES = [
+          "Designing components...",
+          "Writing React code...",
+          "Adding styles...",
+          "Building app logic...",
+          "Wiring up state...",
+          "Almost done...",
+        ];
+        let statusIdx = 0;
+        // Emit a status update every ~800 chars to keep the user informed
+        const STATUS_INTERVAL = 800;
 
-        for await (const chunk of geminiStream) {
-          const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+        for await (const chunk of groqStream) {
+          const delta = chunk.choices[0]?.delta?.content ?? "";
+          if (!delta) continue;
 
-          for (const part of parts) {
-            if (!part.text) continue;
+          accumulated += delta;
+          charCount += delta.length;
 
-            if (part.thought) {
-              // Extract just the short label - not the full wall of text
-              const now = Date.now();
-              if (now - lastEmitTime > 600) {
-                const label = extractThoughtLabel(part.text);
-                if (label) {
-                  enqueue(sseEvent("status", { message: label }));
-                  lastEmitTime = now;
-                }
-              }
-            } else {
-              // Non-thought parts are the actual JSON output - accumulate them
-              accumulated += part.text;
-            }
+          // Emit progress status messages at intervals
+          if (charCount >= STATUS_INTERVAL * (statusIdx + 1) && statusIdx < STATUS_MESSAGES.length) {
+            enqueue(sseEvent("status", { message: STATUS_MESSAGES[statusIdx] }));
+            statusIdx++;
           }
         }
 
-        //  ---- Parse JSON ------
-        //  If Gemini returns malformed JSON we abort here without deducting a credit.
-        // This is the  "no charge on AI failure" guarantee.
+        enqueue(sseEvent("status", { message: "Parsing response..." }));
+
+        // ─── Extract JSON from the accumulated string ───────────────────
+        // The model may occasionally wrap output in ```json ... ``` fences
+        // despite our instructions. Strip them defensively.
+        const cleaned = accumulated
+          .replace(/^```(?:json)?\s*/i, "")
+          .replace(/\s*```\s*$/, "")
+          .trim();
 
         let parsed: {
           assistantMessage: string;
@@ -291,8 +293,8 @@ export async function POST(req: NextRequest) {
         };
 
         try {
-          parsed = JSON.parse(accumulated);
-        } catch (error) {
+          parsed = JSON.parse(cleaned);
+        } catch {
           enqueue(
             sseEvent("error", {
               message: "AI returned invalid JSON. Please try again.",
@@ -302,19 +304,10 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        //  ----- Validate npm packages --------
-        //  Gemini sometimes halucinates packages names that don't exists on npm.
-        // We hit the npm registry for each dep and silenmtly drop any fakes.
-        // Real packages pass through unchaged.
+        const { assistantMessage, title: aiTitle, files, dependencies } = parsed;
 
-        const {
-          assistantMessage,
-          title: aiTitle,
-          files,
-          dependencies,
-        } = parsed;
-
-        enqueue(sseEvent("status", { message: "Validating  packages..." }));
+        // ─── Validate npm packages ──────────────────────────────────────
+        enqueue(sseEvent("status", { message: "Validating packages..." }));
         const validatedDeps = await validateDependencies(dependencies ?? {});
         const newFileData: FileData = {
           files,
@@ -322,18 +315,15 @@ export async function POST(req: NextRequest) {
           title: aiTitle,
         };
 
-        // ---Upsert workspace + deduct credit (single transaction) -----
-        //  Atomic: if either the DB write or the credit fails,
-        // neither happens - user never loses a credit on a failed save.
-        // workspaceId is null on first generation -> credit, string -> update.
-
+        // ─── Upsert workspace + deduct credit (atomic transaction) ──────
         enqueue(sseEvent("status", { message: "Saving project..." }));
 
-        const lastUserMsg = messages[messages.length - 1];
         const updateMessages: Message[] = [
           ...messages,
           { role: "assistant", content: assistantMessage },
         ];
+
+        const lastUserMsg = messages[messages.length - 1];
 
         const [workspace] = await db.$transaction([
           workspaceId
@@ -355,25 +345,15 @@ export async function POST(req: NextRequest) {
 
           db.user.update({
             where: { id: userId },
-            data: {
-              credits: {
-                decrement: CREDIT_COST_PER_GENERATION,
-              },
-            },
+            data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
           }),
         ]);
-
-        // Re-fetch updated credit balance to return accurate value to the client.
-        //  The client updates its local credits state from this - no page refresh needed.
 
         const updatedUser = await db.user.findUnique({
           where: { id: userId },
           select: { credits: true },
         });
 
-        // ---- Final done event ------
-        //  Client receives this, updates Sandpack with the new files,
-        // adds the assistant message to the chat, and updates the credit badge.
         enqueue(
           sseEvent("done", {
             workspaceId: workspace.id,
@@ -387,9 +367,11 @@ export async function POST(req: NextRequest) {
         console.error("[gen-ai-code] stream error:", error);
         const status = (error as { status?: number })?.status;
         const message =
-          status === 503
-            ? "Gemini is overloaded right now. Please try again in a moment."
-            : "Stream failed. Please try again.";
+          status === 429
+            ? "Groq rate limit reached. Please wait a moment and try again."
+            : status === 503
+              ? "Groq is overloaded right now. Please try again in a moment."
+              : "Stream failed. Please try again.";
         enqueue(sseEvent("error", { message }));
       } finally {
         controller.close();
@@ -402,10 +384,10 @@ export async function POST(req: NextRequest) {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      "X-Accel-Buffering": "no", // Disable nginx buffering
+      "X-Accel-Buffering": "no",
     },
   });
 }
 
 export const runtime = "nodejs";
-export const maxDuration = 300; // Vercel fluid - 300s timeout for long generation
+export const maxDuration = 300;
